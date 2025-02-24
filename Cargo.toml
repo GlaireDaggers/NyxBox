@@ -1,0 +1,9 @@
+[package]
+name = "nyxbox"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+rsevents = "0.3.1"
+sdl3 = { version = "0.14.11", features = [ "build-from-source" ]}
+unicorn-engine = "2.1.2"
