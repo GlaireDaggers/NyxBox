@@ -46,7 +46,65 @@ pub fn main() {
     ];
     mem.write().unwrap().main_ram[0..test_program.len()].copy_from_slice(test_program);
 
-    let _vdp = VDP::new(mem.clone(), &graphics_device);
+    let mut _vdp = VDP::new(&graphics_device);
+
+    let cmd_buffer = graphics_device.acquire_command_buffer().unwrap();
+    {
+        // test: upload some vertex data into VRAM
+        _vdp.upload(&[
+            // vertex 0
+            (-1.0_f32).to_bits(),   // position
+            (-1.0_f32).to_bits(),
+            (0.0_f32).to_bits(),
+            (1.0_f32).to_bits(),
+            (0.0_f32).to_bits(),    // texcoord 0
+            (0.0_f32).to_bits(),
+            (0.0_f32).to_bits(),    // texcoord 1
+            (0.0_f32).to_bits(),
+            0xFF0000FF,             // color 0
+            0,                      // color 1
+            // vertex 1
+            (1.0_f32).to_bits(),   // position
+            (-1.0_f32).to_bits(),
+            (0.0_f32).to_bits(),
+            (1.0_f32).to_bits(),
+            (0.0_f32).to_bits(),    // texcoord 0
+            (0.0_f32).to_bits(),
+            (0.0_f32).to_bits(),    // texcoord 1
+            (0.0_f32).to_bits(),
+            0xFF0000FF,             // color 0
+            0,                      // color 1
+            // vertex 2
+            (0.0_f32).to_bits(),   // position
+            (1.0_f32).to_bits(),
+            (0.0_f32).to_bits(),
+            (1.0_f32).to_bits(),
+            (0.0_f32).to_bits(),    // texcoord 0
+            (0.0_f32).to_bits(),
+            (0.0_f32).to_bits(),    // texcoord 1
+            (0.0_f32).to_bits(),
+            0xFF0000FF,             // color 0
+            0,                      // color 1
+        ], 0, &graphics_device, &cmd_buffer);
+
+        // test: upload a command buffer into VRAM
+        _vdp.upload(&[
+            0x00000000,     // write internal register (FBDIM)
+            0x01E00280,     // - value (640x480)
+            0x00000100,     // write internal register (FBADDR)
+            0x00000400,     // - value (0x400)
+            0x00000102,     // draw triangle list (primitive count: 1)
+            0x00000000,     // - address
+            0xAABBCCFF,     // end of queue (token: 0xAABBCC)
+        ], 64, &graphics_device, &cmd_buffer);
+
+        // test: add command to queue
+        _vdp.set_reg(vdp::REG_CMDPORT, 64);
+
+        // test: execute command queues
+        _vdp.tick(&graphics_device, &cmd_buffer);
+    }
+    cmd_buffer.submit().unwrap();
 
     // spawn a thread for the CPU
     thread::spawn(move || {

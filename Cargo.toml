@@ -5,5 +5,5 @@ edition = "2021"
 
 [dependencies]
 rsevents = "0.3.1"
-sdl3 = { version = "0.14.11", features = [ "build-from-source" ]}
+sdl3 = { git = "https://github.com/GlaireDaggers/sdl3-rs.git", branch = "compute_support_2", features = [ "build-from-source-static" ]}
 unicorn-engine = "2.1.2"

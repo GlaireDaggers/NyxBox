@@ -10,9 +10,9 @@ checksum = "8f68f53c83ab957f72c32642f3868eec03eb974d1fb82e453128456482613d36"
 
 [[package]]
 name = "cc"
-version = "1.2.10"
+version = "1.2.15"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "13208fcbb66eaeffe09b99fffbe1af420f00a7b35aa99ad683dfc1aa76145229"
+checksum = "c736e259eea577f443d5c86c304f9f4ae0295c43f3ba05c21f1d66b5f06001af"
 dependencies = [
  "shlex",
 ]
@@ -40,9 +40,9 @@ checksum = "bbd2bcb4c963f2ddae06a2efc7e9f3591312473c50c6685e1f298068316e66fe"
 
 [[package]]
 name = "libc"
-version = "0.2.169"
+version = "0.2.170"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b5aba8db14291edd000dfcc4d620c7ebfb122c613afb886ca8803fa4e128a20a"
+checksum = "875b3680cb2f8f71bdcf9a30f38d48282f5d3c95cbf9b3fa57269bb5d5c06828"
 
 [[package]]
 name = "nyxbox"
@@ -98,13 +98,31 @@ dependencies = [
 
 [[package]]
 name = "sdl3"
-version = "0.14.11"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7ab9fa9ed6942a7b0125ae65b98c9c5f69244783ec4bd1aa15c6650e4cc426e9"
+version = "0.14.13"
+source = "git+https://github.com/GlaireDaggers/sdl3-rs.git?branch=compute_support_2#3ef078fcd9fc854ba37bdf4a4f1d4f661d115210"
 dependencies = [
  "bitflags",
  "lazy_static",
  "libc",
+ "sdl3-image-sys",
+ "sdl3-sys",
+]
+
+[[package]]
+name = "sdl3-image-src"
+version = "3.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d46a2ad6d4ccc39d245efc2e3a0ef2d0bbe82d9d90b8d5400a65a38877650e54"
+
+[[package]]
+name = "sdl3-image-sys"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "092be577d79ecad9a13a0deb759b615e96cae97fcabc489f79b168d5ad8f1b24"
+dependencies = [
+ "cmake",
+ "rpkg-config",
+ "sdl3-image-src",
  "sdl3-sys",
 ]
 

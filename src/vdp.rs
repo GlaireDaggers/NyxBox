@@ -1,8 +1,6 @@
-use std::{collections::VecDeque, sync::{Arc, RwLock}};
+use std::{collections::VecDeque, fs};
 
-use sdl3::gpu::{Buffer, BufferMemMap, BufferRegion, CommandBuffer, Device, TransferBuffer, TransferBufferLocation, TransferBufferUsage};
-
-use crate::mem::Memory;
+use sdl3::gpu::{Buffer, BufferMemMap, BufferRegion, BufferUsageFlags, CommandBuffer, ComputePipeline, Device, ShaderFormat, StorageBufferReadWriteBinding, TransferBuffer, TransferBufferLocation, TransferBufferUsage};
 
 pub const REG_STATUS: usize         = 0;
 pub const REG_CMDPORT: usize        = 1;
@@ -25,26 +23,41 @@ pub const DISPLAYBIT_ENABLE: u32            = 4;
 pub const DISPLAYBIT_INTERLACE: u32         = 8;
 
 const INTERNALREG_FBDIM: u32                = 0;
-const INTERNALREG_VUSTRIDE: u32             = 1;
-const INTERNALREG_VULAYOUT0: u32            = 2;
-const INTERNALREG_VUCDATA0: u32             = 10;
-const INTERNALREG_VUPROGADDR: u32           = 74;
-const INTERNALREG_FOGENCOL: u32             = 75;
-const INTERNALREG_FOGTBL0: u32              = 76;
-const INTERNALREG_CLIPXY: u32               = 140;
-const INTERNALREG_CLIPWH: u32               = 141;
-const INTERNALREG_VPXY: u32                 = 142;
-const INTERNALREG_VPWH: u32                 = 143;
-const INTERNALREG_DEPTH: u32                = 144;
-const INTERNALREG_BLEND: u32                = 145;
-const INTERNALREG_CULL: u32                 = 146;
-const INTERNALREG_TU0CONF: u32              = 147;
-const INTERNALREG_TU1CONF: u32              = 148;
-const INTERNALREG_TU0ADDR: u32              = 149;
-const INTERNALREG_TU1ADDR: u32              = 150;
-const INTERNALREG_TCOMBINE: u32             = 151;
+const INTERNALREG_FBADDR: u32               = 1;
+const INTERNALREG_DBADDR: u32               = 2;
+const INTERNALREG_VUSTRIDE: u32             = 3;
+const INTERNALREG_VULAYOUT0: u32            = 4;
+const INTERNALREG_VUCDATA0: u32             = 12;
+const INTERNALREG_VUPROGADDR: u32           = 76;
+const INTERNALREG_FOGENCOL: u32             = 77;
+const INTERNALREG_FOGTBL0: u32              = 78;
+const INTERNALREG_CLIPXY: u32               = 142;
+const INTERNALREG_CLIPWH: u32               = 143;
+const INTERNALREG_VPXY: u32                 = 144;
+const INTERNALREG_VPWH: u32                 = 145;
+const INTERNALREG_DEPTH: u32                = 146;
+const INTERNALREG_BLEND: u32                = 147;
+const INTERNALREG_CULL: u32                 = 148;
+const INTERNALREG_TUCONF: u32               = 149;
+const INTERNALREG_TU0ADDR: u32              = 150;
+const INTERNALREG_TU1ADDR: u32              = 151;
+const INTERNALREG_TCOMBINE: u32             = 152;
 
-const VTX_CACHE_SIZE: u32                   = 1024 * 1024 * 8;
+const INTERNALREG_COUNT: usize              = 256;
+
+// 8MiB VRAM
+const VRAM_SIZE: u32 = 1024 * 1024 * 8;
+
+#[repr(C)]
+struct VertexUnitUBO {
+    src_addr: u32,
+    dst_addr: u32,
+}
+
+#[repr(C)]
+struct DrawTriListUBO {
+    addr: u32,
+}
 
 pub enum ErrorMode {
     None,
@@ -76,8 +89,7 @@ pub enum VDPCommand {
 }
 
 pub struct VDP {
-    internal_reg: [u32;256],
-    mem: Arc<RwLock<Memory>>,
+    internal_reg: [u32;INTERNALREG_COUNT],
     reset_state: bool,
     cmd_fifo: VecDeque<u32>,
     last_cmd_tok: VecDeque<u32>,
@@ -85,59 +97,64 @@ pub struct VDP {
     display_enable: bool,
     display_interlace: bool,
     err_mode: ErrorMode,
-    vtx_cache_in: Buffer,
-    vtx_cache_out: Buffer,
-    framebuffer: Buffer,
-    depthbuffer: Buffer,
-    tu0_cache: Buffer,
-    tu1_cache: Buffer,
-    vtx_transfer: TransferBuffer,
+    vram: Buffer,
+    vram_transfer: TransferBuffer,
+    regmem: Buffer,
+    regmem_transfer: TransferBuffer,
+    regmem_dirty: bool,
+    vu_pipeline: ComputePipeline,
+    draw_tri_list_pipeline: ComputePipeline,
 }
 
 impl VDP {
-    pub fn new(mem: Arc<RwLock<Memory>>, graphics_device: &Device) -> VDP {
-        let vtx_cache_in = graphics_device.create_buffer()
-            .with_size(VTX_CACHE_SIZE)
+    pub fn new(graphics_device: &Device) -> VDP {
+        let vram = graphics_device.create_buffer()
+            .with_size(VRAM_SIZE)
+            .with_usage(BufferUsageFlags::ComputeStorageRead | BufferUsageFlags::ComputeStorageWrite)
             .build()
             .unwrap();
 
-        let vtx_cache_out = graphics_device.create_buffer()
-            .with_size(VTX_CACHE_SIZE)
-            .build()
-            .unwrap();
-
-        let vtx_transfer = graphics_device.create_transfer_buffer()
-            .with_size(VTX_CACHE_SIZE)
+        let vram_transfer = graphics_device.create_transfer_buffer()
+            .with_size(VRAM_SIZE)
             .with_usage(TransferBufferUsage::Upload)
             .build()
             .unwrap();
 
-        // embedded framebuffer memory can hold up to 1024x1024 rgba32 image
-        let framebuffer = graphics_device.create_buffer()
-            .with_size(1024 * 1024 * 4)
+        let regmem = graphics_device.create_buffer()
+            .with_size((INTERNALREG_COUNT * 4) as u32)
+            .with_usage(sdl3::gpu::BufferUsageFlags::ComputeStorageRead)
             .build()
             .unwrap();
 
-        // embedded depthbuffer memory can hold up to 1024x1024 f32 image
-        let depthbuffer = graphics_device.create_buffer()
-            .with_size(1024 * 1024 * 4)
+        let regmem_transfer = graphics_device.create_transfer_buffer()
+            .with_size((INTERNALREG_COUNT * 4) as u32)
+            .with_usage(sdl3::gpu::TransferBufferUsage::Upload)
             .build()
             .unwrap();
 
-        // each TU cache is 2MiB - can hold up to 512x512 rgba32 mipmapped image, or 1024x1024 DBTC mipmapped image
-        let tu0_cache = graphics_device.create_buffer()
-            .with_size(1024 * 1024 * 2)
-            .build()
-            .unwrap();
+        // load compute shaders
+        let vu_shader = fs::read("content/shaders/vu.spv").unwrap();
+        let vu_pipeline = graphics_device.create_compute_pipeline()
+            .with_code(ShaderFormat::SpirV, &vu_shader)
+            .with_entrypoint("main")
+            .with_readonly_storage_buffers(1)
+            .with_readwrite_storage_buffers(1)
+            .with_uniform_buffers(1)
+            .with_thread_count(1, 1, 1)
+            .build().unwrap();
 
-        let tu1_cache = graphics_device.create_buffer()
-            .with_size(1024 * 1024 * 2)
-            .build()
-            .unwrap();
+        let draw_tri_list_shader = fs::read("content/shaders/draw_tri_list.spv").unwrap();
+        let draw_tri_list_pipeline = graphics_device.create_compute_pipeline()
+            .with_code(ShaderFormat::SpirV, &draw_tri_list_shader)
+            .with_entrypoint("main")
+            .with_readonly_storage_buffers(1)
+            .with_readwrite_storage_buffers(1)
+            .with_uniform_buffers(1)
+            .with_thread_count(1, 1, 1)
+            .build().unwrap();
 
         VDP {
             internal_reg: [0;256],
-            mem,
             reset_state: false,
             cmd_fifo: VecDeque::new(),
             last_cmd_tok: VecDeque::new(),
@@ -145,13 +162,13 @@ impl VDP {
             display_enable: false,
             display_interlace: false,
             err_mode: ErrorMode::None,
-            vtx_cache_in,
-            vtx_cache_out,
-            framebuffer,
-            depthbuffer,
-            tu0_cache,
-            tu1_cache,
-            vtx_transfer,
+            vram,
+            vram_transfer,
+            regmem,
+            regmem_transfer,
+            regmem_dirty: true,
+            vu_pipeline,
+            draw_tri_list_pipeline,
         }
     }
 
@@ -205,22 +222,37 @@ impl VDP {
         }
     }
 
-    pub fn tick(self: &mut Self, graphics_device: &Device) {
-        let cmd_buffer = graphics_device.acquire_command_buffer().unwrap();
-
+    pub fn tick(self: &mut Self, graphics_device: &Device, cmd_buffer: &CommandBuffer) {
         // execute commands
         let cmds = self.cmd_fifo.drain(0..).collect::<Vec<u32>>();
         for cmd_addr in cmds {
             self.exec_cmd_queue(cmd_addr, graphics_device, &cmd_buffer);
         }
+    }
 
-        cmd_buffer.submit().unwrap();
+    pub fn upload(self: &mut Self, mem: &[u32], dst_addr: u32, gfx_device: &Device, cmd_buffer: &CommandBuffer) {
+        let mut vram: BufferMemMap<'_, u32> = self.vram_transfer.map::<u32>(gfx_device, false);
+        vram.mem_mut()[dst_addr as usize..][..mem.len()].copy_from_slice(mem);
+        drop(vram);
+
+        let copy_pass = gfx_device.begin_copy_pass(cmd_buffer).unwrap();
+        copy_pass.upload_to_gpu_buffer(
+        TransferBufferLocation::new()
+            .with_transfer_buffer(&self.vram_transfer)
+            .with_offset(dst_addr), 
+        BufferRegion::new()
+            .with_buffer(&self.vram)
+            .with_offset(dst_addr)
+            .with_size(mem.len() as u32),
+        false);
+        gfx_device.end_copy_pass(copy_pass);
     }
 
     fn reset(self: &mut Self) {
         for r in &mut self.internal_reg {
             *r = 0;
         }
+        self.regmem_dirty = true;
         self.cmd_fifo.clear();
         self.last_cmd_tok.clear();
         self.display_enable = false;
@@ -229,33 +261,36 @@ impl VDP {
         self.err_mode = ErrorMode::None;
     }
 
-    fn check_addr(self: &mut Self, addr: u32) -> bool {
-        if addr % 4 != 0 {
-            self.err_mode = ErrorMode::AddressError;
-            return false;
+    fn load_word(mem: &BufferMemMap<u32>, addr: &mut u32) -> u32 {
+        let word = mem.mem()[*addr as usize];
+        *addr += 1;
+        return word;
+    }
+
+    fn load_single(mem: &BufferMemMap<u32>, addr: &mut u32) -> f32 {
+        let word = mem.mem()[*addr as usize];
+        *addr += 1;
+        return f32::from_bits(word);
+    }
+
+    fn flush_regmem(regmem_transfer: &mut TransferBuffer, regmem: &Buffer, internal_reg: &[u32], gfx_device: &Device, cmd_buffer: &CommandBuffer, regmem_dirty: &mut bool) {
+        if *regmem_dirty {
+            let mut transfer = regmem_transfer.map::<u32>(gfx_device, true);
+            transfer.mem_mut().copy_from_slice(internal_reg);
+            drop(transfer);
+
+            let copy_pass = gfx_device.begin_copy_pass(cmd_buffer).unwrap();
+            copy_pass.upload_to_gpu_buffer(TransferBufferLocation::new().with_transfer_buffer(&regmem_transfer),
+                BufferRegion::new().with_buffer(&regmem).with_size(regmem.len()), true);
+            gfx_device.end_copy_pass(copy_pass);
+
+            *regmem_dirty = false;
         }
-
-        return true;
-    }
-
-    fn load_word(mem: &Memory, addr: &mut u32) -> u32 {
-        let word = mem.load::<u32>(*addr);
-        *addr += 4;
-        return word;
-    }
-
-    fn load_single(mem: &Memory, addr: &mut u32) -> f32 {
-        let word = mem.load::<f32>(*addr);
-        *addr += 4;
-        return word;
     }
 
     fn exec_cmd_queue(self: &mut Self, mut addr: u32, gfx_device: &Device, cmd_buffer: &CommandBuffer) {
-        if !self.check_addr(addr) {
-            return;
-        }
-
-        let mem = self.mem.read().unwrap();
+        // command buffers reside in VRAM - lucky for us, we basically maintain a full copy of the VRAM state in a transfer buffer
+        let mem: BufferMemMap<'_, u32> = self.vram_transfer.map::<u32>(gfx_device, false);
 
         loop {
             let hdr = Self::load_word(&mem, &mut addr);
@@ -267,50 +302,81 @@ impl VDP {
                     let register_idx = (hdr >> 8) & 0xFF;
                     let register_val = Self::load_word(&mem, &mut addr);
                     self.internal_reg[register_idx as usize] = register_val;
+                    self.regmem_dirty = true;
                 }
-                // draw list
+                // process vertex list
                 1 => {
-                    let _topology = (hdr >> 8) & 3;
-                    let count = hdr >> 10;
-                    let ptr = Self::load_word(&mem, &mut addr) as usize;
+                    let count = hdr >> 8;
+                    let src_ptr = Self::load_word(&mem, &mut addr);
+                    let dst_ptr = Self::load_word(&mem, &mut addr);
 
-                    // note: cannot submit more than 8MiB of data at a time
-                    let stride = self.internal_reg[INTERNALREG_VUSTRIDE as usize];
-                    let num_bytes = (stride * count).min(VTX_CACHE_SIZE) as usize;
+                    Self::flush_regmem(&mut self.regmem_transfer, &self.regmem, &self.internal_reg, gfx_device, cmd_buffer, &mut self.regmem_dirty);
 
-                    let src_slice = &mem.main_ram[ptr..][..num_bytes];
+                    let compute_pass = gfx_device.begin_compute_pass(cmd_buffer, &[], &[
+                        StorageBufferReadWriteBinding::new().with_buffer(&self.vram).with_cycle(false)
+                    ]).unwrap();
+                    {
+                        compute_pass.bind_compute_pipeline(&self.vu_pipeline);
+                        compute_pass.bind_compute_storage_buffers(0, &[&self.regmem]);
 
-                    // copy vertex data to input cache
-                    let mut map = self.vtx_transfer.map::<u8>(gfx_device, true);
-                    map.mem_mut().copy_from_slice(src_slice);
-                    drop(map);
+                        let ubo = VertexUnitUBO {
+                            src_addr: src_ptr,
+                            dst_addr: dst_ptr
+                        };
+                        cmd_buffer.push_compute_uniform_data(0, &ubo);
 
-                    let copy_pass = gfx_device.begin_copy_pass(cmd_buffer).unwrap();
-                    copy_pass.upload_to_gpu_buffer(TransferBufferLocation::new()
-                        .with_transfer_buffer(&self.vtx_transfer)
-                    , BufferRegion::new()
-                        .with_buffer(&self.vtx_cache_in)
-                        .with_size(num_bytes as u32)
-                    , true);
-                    gfx_device.end_copy_pass(copy_pass);
+                        compute_pass.dispatch(count, 1, 1);
+                    }
+                    gfx_device.end_compute_pass(compute_pass);
+                }
+                // draw triangle list
+                2 => {
+                    let count = hdr >> 8;
+                    let src_ptr = Self::load_word(&mem, &mut addr);
 
-                    // transform vertex data into output cache
+                    Self::flush_regmem(&mut self.regmem_transfer, &self.regmem, &self.internal_reg, gfx_device, cmd_buffer, &mut self.regmem_dirty);
+
+                    let compute_pass = gfx_device.begin_compute_pass(cmd_buffer, &[], &[
+                        StorageBufferReadWriteBinding::new().with_buffer(&self.vram).with_cycle(false)
+                    ]).unwrap();
+                    {
+                        compute_pass.bind_compute_pipeline(&self.draw_tri_list_pipeline);
+                        compute_pass.bind_compute_storage_buffers(0, &[&self.regmem]);
+
+                        let ubo = DrawTriListUBO {
+                            addr: src_ptr
+                        };
+                        cmd_buffer.push_compute_uniform_data(0, &ubo);
+
+                        compute_pass.dispatch(count, 1, 1);
+                    }
+                    gfx_device.end_compute_pass(compute_pass);
+                }
+                // draw triangle strip
+                3 => {
+                    let _count = hdr >> 8;
+                    let _src_ptr = Self::load_word(&mem, &mut addr);
+                }
+                // draw line list
+                4 => {
+                    let _count = hdr >> 8;
+                    let _src_ptr = Self::load_word(&mem, &mut addr);
+                }
+                // draw line strip
+                5 => {
+                    let _count = hdr >> 8;
+                    let _src_ptr = Self::load_word(&mem, &mut addr);
                 }
                 // clear color
-                2 => {
+                6 => {
                     let _color = Self::load_word(&mem, &mut addr);
                 }
                 // clear depth
-                3 => {
+                7 => {
                     let _depth = Self::load_word(&mem, &mut addr);
                 }
-                // swap buffers
-                4 => {
-                    let _copy = (hdr >> 8) & 1 != 0;
-                    let _copy_target = Self::load_word(&mem, &mut addr);
-                }
                 // end of queue
-                5 => {
+                0xFF => {
                     let token = hdr >> 8;
                     self.last_cmd_tok.push_back(token);
                     return;
