@@ -1,6 +1,6 @@
-use std::{sync::{Arc, RwLock}, thread};
+use std::{sync::{Arc, RwLock}, thread, u64};
 
-use mem::{Memory, MAIN_RAM_BEGIN, MAIN_RAM_END, MAIN_RAM_SIZE};
+use mem::{Memory, BOOT_ROM_BEGIN, BOOT_ROM_SIZE, MAIN_RAM_BEGIN, MAIN_RAM_END, MAIN_RAM_SIZE};
 use rsevents::{AutoResetEvent, Awaitable, EventState};
 use sdl3::{event::Event, gpu::{ColorTargetInfo, Device, LoadOp, ShaderFormat, StoreOp}, pixels::Color};
 use unicorn_engine::{Mode, Permission, Unicorn};
@@ -44,7 +44,7 @@ pub fn main() {
         0x00, 0x00, 0x00, 0xef,
         0xfc, 0xff, 0xff, 0xea,
     ];
-    mem.write().unwrap().main_ram[0..test_program.len()].copy_from_slice(test_program);
+    mem.write().unwrap().boot_rom[0..test_program.len()].copy_from_slice(test_program);
 
     let mut _vdp = VDP::new(&graphics_device);
 
@@ -113,7 +113,10 @@ pub fn main() {
 
         {
             let mut mem = mem.write().unwrap();
-            unsafe { uc_engine.mem_map_ptr(MAIN_RAM_BEGIN as u64, MAIN_RAM_SIZE, Permission::all(), mem.main_ram.as_mut_ptr().cast()).unwrap(); }
+            unsafe {
+                uc_engine.mem_map_ptr(BOOT_ROM_BEGIN as u64, BOOT_ROM_SIZE, Permission::READ | Permission::EXEC, mem.boot_rom.as_mut_ptr().cast()).unwrap();
+                uc_engine.mem_map_ptr(MAIN_RAM_BEGIN as u64, MAIN_RAM_SIZE, Permission::ALL, mem.main_ram.as_mut_ptr().cast()).unwrap();
+            }
         }
 
         // use to implement BIOS hooks
@@ -129,11 +132,11 @@ pub fn main() {
             }
         }).unwrap();
 
-        let mut pc = MAIN_RAM_BEGIN as u64;
+        let mut pc = BOOT_ROM_BEGIN as u64;
 
         // run until WFI
         loop {
-            uc_engine.emu_start(pc, MAIN_RAM_END as u64, 0, 0).unwrap();
+            uc_engine.emu_start(pc, u64::MAX, 0, 0).unwrap();
             pc = uc_engine.pc_read().unwrap();
             CPU_SIGNAL.wait();
         }
