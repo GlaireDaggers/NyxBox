@@ -1,9 +1,10 @@
-use std::{sync::{Arc, RwLock}, thread, u64};
+use std::sync::{Arc, RwLock};
 
-use mem::{Memory, BOOT_ROM_BEGIN, BOOT_ROM_SIZE, MAIN_RAM_BEGIN, MAIN_RAM_END, MAIN_RAM_SIZE};
-use rsevents::{AutoResetEvent, Awaitable, EventState};
+use clock::Clock;
+use machine::Machine;
+use mem::{Memory, BOOT_ROM_BEGIN, CLOCK_BEGIN, MAIN_RAM_BEGIN};
 use sdl3::{event::Event, gpu::{ColorTargetInfo, Device, LoadOp, ShaderFormat, StoreOp}, pixels::Color};
-use unicorn_engine::{Mode, Permission, Unicorn};
+use unicorn_engine::Permission;
 use vdp::VDP;
 
 extern crate sdl3;
@@ -12,9 +13,10 @@ extern crate rsevents;
 
 mod vdp;
 mod mem;
+mod peripheral;
+mod machine;
 
-// used to wake up CPU thread to handle interrupts
-static CPU_SIGNAL: AutoResetEvent = AutoResetEvent::new(EventState::Unset);
+mod clock;
 
 pub fn main() {
     let sdl_context = sdl3::init().unwrap();
@@ -30,28 +32,60 @@ pub fn main() {
 
     let mut event_pump = sdl_context.event_pump().unwrap();
 
-    let mem = Arc::new(RwLock::new(Memory::new()));
+    let mut mem = Memory::new();
 
     // https://shell-storm.org/online/Online-Assembler-and-Disassembler
     /*
+    ldr r0,=0x0         ; disable RTC
+    ldr r1,=0x8000000
+    str r0, [r1]
+
+    ldr r0,=12345       ; set clock
+    ldr r1,=0x8000004
+    str r0, [r1]
+
+    ldr r0,=0x1         ; enable RTC
+    ldr r1,=0x8000000
+    str r0, [r1]
+
+    ldr r1,=0x8000004
+
     my_program:
         wfi
         swi 0
+        ldr r0, [r1]    ; read clock
         b my_program
      */
     let test_program: &[u8] = &[
-        0x03, 0xf0, 0x20, 0xe3,
-        0x00, 0x00, 0x00, 0xef,
-        0xfc, 0xff, 0xff, 0xea,
+        0x30, 0x00, 0x9f, 0xe5, 0x30, 0x10, 0x9f, 0xe5, 
+        0x00, 0x00, 0x81, 0xe5, 0x2c, 0x00, 0x9f, 0xe5, 
+        0x2c, 0x10, 0x9f, 0xe5, 0x00, 0x00, 0x81, 0xe5, 
+        0x28, 0x00, 0x9f, 0xe5, 0x28, 0x10, 0x9f, 0xe5, 
+        0x00, 0x00, 0x81, 0xe5, 0x24, 0x10, 0x9f, 0xe5, 
+        0x03, 0xf0, 0x20, 0xe3, 0x00, 0x00, 0x00, 0xef, 
+        0x00, 0x00, 0x91, 0xe5, 0xfb, 0xff, 0xff, 0xea, 
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x08, 
+        0x39, 0x30, 0x00, 0x00, 0x04, 0x00, 0x00, 0x08, 
+        0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x08, 
+        0x04, 0x00, 0x00, 0x08,
     ];
-    mem.write().unwrap().boot_rom[0..test_program.len()].copy_from_slice(test_program);
+    mem.boot_rom[0..test_program.len()].copy_from_slice(test_program);
 
-    let mut _vdp = VDP::new(&graphics_device);
+    let mut machine = Machine::new();
+
+    // map system memory
+    machine.map_memory(&mut mem.boot_rom, BOOT_ROM_BEGIN as u32, Permission::READ | Permission::EXEC);
+    machine.map_memory(&mut mem.main_ram, MAIN_RAM_BEGIN as u32, Permission::ALL);
+
+    let clock = Arc::new(RwLock::new(Clock::new()));
+    machine.map_peripheral(clock.clone(), CLOCK_BEGIN as u32, 4096);
+
+    let mut vdp = VDP::new(&graphics_device);
 
     let cmd_buffer = graphics_device.acquire_command_buffer().unwrap();
     {
         // test: upload some vertex data into VRAM
-        _vdp.upload(&[
+        vdp.upload(&[
             // vertex 0
             (-1.0_f32).to_bits(),   // position
             (-1.0_f32).to_bits(),
@@ -88,7 +122,7 @@ pub fn main() {
         ], 0, &graphics_device, &cmd_buffer);
 
         // test: upload a command buffer into VRAM
-        _vdp.upload(&[
+        vdp.upload(&[
             0x00000000,     // write internal register (FBDIM)
             0x01E00280,     // - value (640x480)
             0x00000100,     // write internal register (FBADDR)
@@ -99,48 +133,12 @@ pub fn main() {
         ], 64, &graphics_device, &cmd_buffer);
 
         // test: add command to queue
-        _vdp.set_reg(vdp::REG_CMDPORT, 64);
-
-        // test: execute command queues
-        _vdp.tick(&graphics_device, &cmd_buffer);
+        vdp.set_reg(vdp::REG_CMDPORT, 64);
     }
     cmd_buffer.submit().unwrap();
 
-    // spawn a thread for the CPU
-    thread::spawn(move || {
-        let mut uc_engine = Unicorn::new(unicorn_engine::Arch::ARM, Mode::ARM1176).unwrap();
-        uc_engine.ctl_set_cpu_model(unicorn_engine::ArmCpuModel::UC_CPU_ARM_1176 as i32).unwrap();
-
-        {
-            let mut mem = mem.write().unwrap();
-            unsafe {
-                uc_engine.mem_map_ptr(BOOT_ROM_BEGIN as u64, BOOT_ROM_SIZE, Permission::READ | Permission::EXEC, mem.boot_rom.as_mut_ptr().cast()).unwrap();
-                uc_engine.mem_map_ptr(MAIN_RAM_BEGIN as u64, MAIN_RAM_SIZE, Permission::ALL, mem.main_ram.as_mut_ptr().cast()).unwrap();
-            }
-        }
-
-        // use to implement BIOS hooks
-        uc_engine.add_intr_hook(|uc, intr| {
-            if intr == 2 {
-                // swi
-                let addr = uc.pc_read().unwrap() - 4;
-                let mut insr = [0;4];
-                uc.mem_read(addr, &mut insr).unwrap();
-                let swi_num = insr[0];
-
-                println!("SWI: {}", swi_num);
-            }
-        }).unwrap();
-
-        let mut pc = BOOT_ROM_BEGIN as u64;
-
-        // run until WFI
-        loop {
-            uc_engine.emu_start(pc, u64::MAX, 0, 0).unwrap();
-            pc = uc_engine.pc_read().unwrap();
-            CPU_SIGNAL.wait();
-        }
-    });
+    // start running the CPU
+    let run_ctx = machine.run();
 
     let mut frame = 0;
     let mut prev_tick = sdl3::timer::performance_counter();
@@ -166,17 +164,21 @@ pub fn main() {
 
         accum += dt;
 
+        let mut cmd_buf = graphics_device.acquire_command_buffer().unwrap();
+
         while accum >= TIMESTEP {
             accum -= TIMESTEP;
             
             println!("FRAME: {}", frame);
             frame += 1;
 
-            // todo: vsync interrupt
-            CPU_SIGNAL.set();
+            // update VDP
+            vdp.tick(&graphics_device, &cmd_buf);
+
+            // todo: actual interrupts
+            run_ctx.raise_signal();
         }
 
-        let mut cmd_buf = graphics_device.acquire_command_buffer().unwrap();
         if let Ok(swap_target) = cmd_buf.wait_and_acquire_swapchain_texture(&window) {
             let targets = [
                 ColorTargetInfo::default()
@@ -189,6 +191,7 @@ pub fn main() {
             graphics_device.end_render_pass(render_pass);
         }
         cmd_buf.submit().unwrap();
-
     }
+
+    run_ctx.stop();
 }
