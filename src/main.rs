@@ -1,9 +1,10 @@
-use std::sync::{Arc, RwLock};
+use std::{io, sync::{Arc, RwLock}};
 
-use clock::Clock;
+use clock::{Clock, CLOCK_MEM_SIZE};
 use machine::Machine;
-use mem::{Memory, BOOT_ROM_BEGIN, CLOCK_BEGIN, MAIN_RAM_BEGIN};
+use mem::{Memory, BOOT_ROM_BEGIN, CLOCK_BEGIN, MAIN_RAM_BEGIN, UART_BEGIN};
 use sdl3::{event::Event, gpu::{ColorTargetInfo, Device, LoadOp, ShaderFormat, StoreOp}, pixels::Color};
+use uart::{UART, UART_MEM_SIZE};
 use unicorn_engine::Permission;
 use vdp::VDP;
 
@@ -11,12 +12,13 @@ extern crate sdl3;
 extern crate unicorn_engine;
 extern crate rsevents;
 
-mod vdp;
 mod mem;
 mod peripheral;
 mod machine;
 
 mod clock;
+mod uart;
+mod vdp;
 
 pub fn main() {
     let sdl_context = sdl3::init().unwrap();
@@ -48,6 +50,19 @@ pub fn main() {
     ldr r1,=0x8000000
     str r0, [r1]
 
+    ldr r1,=0x6000004   ; write "Hello\n" to UART
+    ldr r0, =72
+    str r0, [r1]
+    ldr r0, =101
+    str r0, [r1]
+    ldr r0, =108
+    str r0, [r1]
+    str r0, [r1]
+    ldr r0, =111
+    str r0, [r1]
+    ldr r0, =10
+    str r0, [r1]
+
     ldr r1,=0x8000004
 
     my_program:
@@ -57,17 +72,26 @@ pub fn main() {
         b my_program
      */
     let test_program: &[u8] = &[
-        0x30, 0x00, 0x9f, 0xe5, 0x30, 0x10, 0x9f, 0xe5, 
-        0x00, 0x00, 0x81, 0xe5, 0x2c, 0x00, 0x9f, 0xe5, 
-        0x2c, 0x10, 0x9f, 0xe5, 0x00, 0x00, 0x81, 0xe5, 
-        0x28, 0x00, 0x9f, 0xe5, 0x28, 0x10, 0x9f, 0xe5, 
-        0x00, 0x00, 0x81, 0xe5, 0x24, 0x10, 0x9f, 0xe5, 
+        0x60, 0x00, 0x9f, 0xe5, 0x60, 0x10, 0x9f, 0xe5, 
+        0x00, 0x00, 0x81, 0xe5, 0x5c, 0x00, 0x9f, 0xe5, 
+        0x5c, 0x10, 0x9f, 0xe5, 0x00, 0x00, 0x81, 0xe5, 
+        0x58, 0x00, 0x9f, 0xe5, 0x58, 0x10, 0x9f, 0xe5, 
+        0x00, 0x00, 0x81, 0xe5, 0x54, 0x10, 0x9f, 0xe5, 
+        0x54, 0x00, 0x9f, 0xe5, 0x00, 0x00, 0x81, 0xe5, 
+        0x50, 0x00, 0x9f, 0xe5, 0x00, 0x00, 0x81, 0xe5, 
+        0x4c, 0x00, 0x9f, 0xe5, 0x00, 0x00, 0x81, 0xe5, 
+        0x00, 0x00, 0x81, 0xe5, 0x44, 0x00, 0x9f, 0xe5, 
+        0x00, 0x00, 0x81, 0xe5, 0x40, 0x00, 0x9f, 0xe5, 
+        0x00, 0x00, 0x81, 0xe5, 0x3c, 0x10, 0x9f, 0xe5, 
         0x03, 0xf0, 0x20, 0xe3, 0x00, 0x00, 0x00, 0xef, 
         0x00, 0x00, 0x91, 0xe5, 0xfb, 0xff, 0xff, 0xea, 
         0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x08, 
         0x39, 0x30, 0x00, 0x00, 0x04, 0x00, 0x00, 0x08, 
         0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x08, 
-        0x04, 0x00, 0x00, 0x08,
+        0x04, 0x00, 0x00, 0x06, 0x48, 0x00, 0x00, 0x00, 
+        0x65, 0x00, 0x00, 0x00, 0x6c, 0x00, 0x00, 0x00, 
+        0x6f, 0x00, 0x00, 0x00, 0x0a, 0x00, 0x00, 0x00, 
+        0x04, 0x00, 0x00, 0x08, 
     ];
     mem.boot_rom[0..test_program.len()].copy_from_slice(test_program);
 
@@ -77,9 +101,14 @@ pub fn main() {
     machine.map_memory(&mut mem.boot_rom, BOOT_ROM_BEGIN as u32, Permission::READ | Permission::EXEC);
     machine.map_memory(&mut mem.main_ram, MAIN_RAM_BEGIN as u32, Permission::ALL);
 
+    // map peripherals
+    let uart = Arc::new(RwLock::new(UART::new(io::stdout())));
     let clock = Arc::new(RwLock::new(Clock::new()));
-    machine.map_peripheral(clock.clone(), CLOCK_BEGIN as u32, 4096);
 
+    machine.map_peripheral(uart.clone(), UART_BEGIN as u32, UART_MEM_SIZE);
+    machine.map_peripheral(clock.clone(), CLOCK_BEGIN as u32, CLOCK_MEM_SIZE);
+
+    // set up VDP
     let mut vdp = VDP::new(&graphics_device);
 
     let cmd_buffer = graphics_device.acquire_command_buffer().unwrap();
@@ -140,7 +169,6 @@ pub fn main() {
     // start running the CPU
     let run_ctx = machine.run();
 
-    let mut frame = 0;
     let mut prev_tick = sdl3::timer::performance_counter();
     let mut accum = 0.0;
 
@@ -164,14 +192,15 @@ pub fn main() {
 
         accum += dt;
 
+        if accum >= (4.0 * TIMESTEP) {
+            accum = 4.0 * TIMESTEP;
+        }
+
         let mut cmd_buf = graphics_device.acquire_command_buffer().unwrap();
 
         while accum >= TIMESTEP {
             accum -= TIMESTEP;
             
-            println!("FRAME: {}", frame);
-            frame += 1;
-
             // update VDP
             vdp.tick(&graphics_device, &cmd_buf);
 

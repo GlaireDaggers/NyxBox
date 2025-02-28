@@ -2,6 +2,8 @@ use std::time::Instant;
 
 use crate::peripheral::Peripheral;
 
+pub const CLOCK_MEM_SIZE: u32 = 4096;
+
 fn get_sdl_ctr() -> u64 {
     let ctr = sdl3::timer::performance_counter();
     let freq = sdl3::timer::performance_frequency();

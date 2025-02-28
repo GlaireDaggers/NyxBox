@@ -22,9 +22,6 @@ impl <'a> Machine<'a> {
 
         // use to implement BIOS hooks
         cpu.add_intr_hook(|uc, intr| {
-            let r0 = uc.reg_read(RegisterARM::R0).unwrap();
-            println!("R0: {}", r0);
-
             if intr == 2 {
                 // swi
                 let addr = uc.pc_read().unwrap() - 4;
@@ -32,7 +29,7 @@ impl <'a> Machine<'a> {
                 uc.mem_read(addr, &mut insr).unwrap();
                 let swi_num = insr[0];
 
-                println!("SWI: {}", swi_num);
+                // println!("SWI: {}", swi_num);
             }
         }).unwrap();
 

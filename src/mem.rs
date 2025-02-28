@@ -10,6 +10,7 @@ pub const BOOT_ROM_BEGIN: usize = 0x0000000;
 pub const MAIN_RAM_BEGIN: usize = 0x1000000;
 // pub const MAIN_RAM_END: usize = MAIN_RAM_BEGIN + (MAIN_RAM_SIZE - 1);
 
+pub const UART_BEGIN: usize = 0x6000000;
 pub const CLOCK_BEGIN: usize = 0x8000000;
 
 pub struct Memory {
